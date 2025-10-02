@@ -6,7 +6,6 @@ import streamlit as st
 from openai import OpenAI
 from menu import menu
 
-
 from helpers import (
     load_all_data,                 # cached data loader
     get_months, get_latest_month,  # month utilities
@@ -16,7 +15,6 @@ from helpers import (
 # ---------------- Page Config ----------------
 st.set_page_config(page_title="🤖 AI Insights", layout="wide")
 st.header("🤖 AI-Powered Insights & Recommendations")
-
 
 if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
     st.switch_page("app.py")
@@ -29,7 +27,7 @@ role = st.session_state["role"]
 
 st.info(
     "**AI Analysis**: This section uses pattern recognition to identify opportunities and risks in your sales data. "
-    "You can also generate a concise executive summary if an OpenAI API key is configured."
+    "You can also generate a concise executive summary if an OpenAI API key is configured in `st.secrets`."
 )
 
 # ---------------- Load data ----------------
@@ -290,19 +288,24 @@ with tab3:
 st.divider()
 st.subheader("💡 AI-Generated Executive Summary")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4-mini")
-api_key = os.getenv("OPENAI_API_KEY")
+# ---- Read OpenAI config from st.secrets (no env vars) ----
+_openai = st.secrets.get("openai", {})
+OPENAI_MODEL = _openai.get("model", "gpt-4-mini")
+OPENAI_API_KEY = _openai.get("api_key")
+OPENAI_BASE_URL = _openai.get("base_url", None)  # optional
 
-if api_key:
+if OPENAI_API_KEY:
     if st.button("Generate AI Summary", key="ai_summary_btn", type="primary"):
         with st.spinner("Generating personalized insights..."):
-            
-            client = OpenAI(api_key=api_key)
+            # Init client using secrets
+            client_kwargs = {"api_key": OPENAI_API_KEY}
+            if OPENAI_BASE_URL:
+                client_kwargs["base_url"] = OPENAI_BASE_URL
+            client = OpenAI(**client_kwargs)
 
             # Build context string
             all_customers = sorted(set(ai_sales["CustomerName"].unique()) | set(ai_bookings["CustomerName"].unique()))
-            # Prepare opportunity_df for count if created above
-            # (Recompute succinctly to avoid scope issues)
+            # Recompute quick opp count
             opp_count = 0
             if not ai_bookings.empty:
                 _tmp = []
@@ -354,7 +357,8 @@ if api_key:
             except Exception as e:
                 st.error(f"AI generation failed: {e}")
 else:
-    st.info("Set the **OPENAI_API_KEY** environment variable to enable AI summaries.")
+    st.info("Add your OpenAI credentials to **st.secrets**:\n\n"
+            "```toml\n[openai]\napi_key = \"sk-...\"\nmodel = \"gpt-4-mini\"\n# base_url = \"https://api.openai.com/v1\"  # optional\n```")
 
 # ---------------- Footer / Export ----------------
 st.divider()

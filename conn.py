@@ -18,14 +18,14 @@ from sqlalchemy import (
     select, insert, delete, update,
 )
 
+# IMPORTANT: use Streamlit secrets for config
+import streamlit as st
+
 # ---- password hashing context (Passlib handles hashing & verify) ----
-
-
 pwd_context = CryptContext(
-    schemes=["pbkdf2_sha256"],   # ← only this
+    schemes=["pbkdf2_sha256"],   # ← use a single well-supported scheme
     deprecated="auto",
 )
-
 
 # ------------------------------
 # Logging
@@ -34,36 +34,69 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ============================================================
-#                SALES / BOOKINGS DB (existing)
+#                     CONFIG FROM SECRETS
 # ============================================================
-'''
-DB_HOST   = "192.168.100.2"
-DB_PORT   = 3306
-DB_USER   = "abhishek"
-DB_PASS   = "passwordA"
-DB_NAME   = "salesDB"         # <- database (schema) name
-DB_TABLE  = "sales_report"    # <- default table (sales)
-DB_DRIVER = "mysql+pymysql"
-'''
+def _get_secret(path: List[str], default: Any = None) -> Any:
+    """
+    Safely fetch nested keys from st.secrets, with env-var fallbacks for CI/local runs.
+    Path examples:
+      ["mysql", "host"], ["mysql", "timeouts", "connect"]
+    """
+    try:
+        ref = st.secrets
+        for k in path:
+            ref = ref[k]
+        return ref
+    except Exception:
+        # Fallback to environment variables for local dev/CI
+        # Map common paths to ENV names
+        env_map = {
+            ("mysql", "host"): "DB_HOST",
+            ("mysql", "port"): "DB_PORT",
+            ("mysql", "user"): "DB_USER",
+            ("mysql", "password"): "DB_PASS",
+            ("mysql", "database"): "DB_NAME",
+            ("mysql", "driver"): "DB_DRIVER",
+            ("mysql", "table_sales"): "DB_TABLE",
+            ("mysql", "table_bookings"): "DB_TABLE_BOOKINGS",
+            ("mysql", "timeouts", "connect"): "DB_CONNECT_TIMEOUT",
+            ("mysql", "timeouts", "read"): "DB_READ_TIMEOUT",
+            ("mysql", "timeouts", "write"): "DB_WRITE_TIMEOUT",
+            ("mysql", "timeouts", "pool"): "DB_POOL_TIMEOUT",
+        }
+        env_key = env_map.get(tuple(path))
+        if env_key and env_key in os.environ:
+            val = os.environ[env_key]
+            # Cast ports/timeouts to int when appropriate
+            if tuple(path) in {
+                ("mysql", "port"),
+                ("mysql", "timeouts", "connect"),
+                ("mysql", "timeouts", "read"),
+                ("mysql", "timeouts", "write"),
+                ("mysql", "timeouts", "pool"),
+            }:
+                try:
+                    return int(val)
+                except Exception:
+                    return default
+            return val
+        return default
 
-DB_HOST ="database-1.c9wq6somacoq.ap-south-1.rds.amazonaws.com"
-DB_USER ="beeshaker"
-DB_PASS = "eNJD7QvFIT1"
-DB_NAME= "fullsales"
+DB_HOST   = _get_secret(["mysql", "host"], "localhost")
+DB_PORT   = _get_secret(["mysql", "port"], 3306)
+DB_USER   = _get_secret(["mysql", "user"], "user")
+DB_PASS   = _get_secret(["mysql", "password"], "")
+DB_NAME   = _get_secret(["mysql", "database"], "fullsales")
+DB_DRIVER = _get_secret(["mysql", "driver"], "mysql+pymysql")
 
-DB_TABLE  = "sales_report"    # <- default table (sales)
-DB_DRIVER = "mysql+pymysql"
-
-
-
-# Additional table for bookings (same structure as sales)
-DB_TABLE_BOOKINGS = "booking_report"
+DB_TABLE           = _get_secret(["mysql", "table_sales"], "sales_report")
+DB_TABLE_BOOKINGS  = _get_secret(["mysql", "table_bookings"], "booking_report")
 
 # Timeouts (seconds)
-CONNECT_TIMEOUT = 8
-READ_TIMEOUT    = 90
-WRITE_TIMEOUT   = 30
-POOL_TIMEOUT    = 10
+CONNECT_TIMEOUT = _get_secret(["mysql", "timeouts", "connect"], 8)
+READ_TIMEOUT    = _get_secret(["mysql", "timeouts", "read"], 90)
+WRITE_TIMEOUT   = _get_secret(["mysql", "timeouts", "write"], 30)
+POOL_TIMEOUT    = _get_secret(["mysql", "timeouts", "pool"], 10)
 
 CLIP_TO_MONTH = pd.Timestamp(_dt.date.today().replace(day=1))
 
@@ -83,14 +116,16 @@ class Conn:
         bookings = conn.load_bookings_data()
 
         # Auth
-        conn.add_user("CAROL", "password123", role="salesperson")
+        conn.create_user("CAROL", "password123", role="salesperson")
         ok, role = conn.authenticate_user("CAROL", "password123")
 
         # Audit
         conn.write_audit("CAROL", "login", extra="Login success")
     """
     def __init__(self):
-        url = f"{DB_DRIVER}://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
+        # Build SQLAlchemy URL (include port if present)
+        host_port = f"{DB_HOST}:{DB_PORT}" if DB_PORT else DB_HOST
+        url = f"{DB_DRIVER}://{DB_USER}:{DB_PASS}@{host_port}/{DB_NAME}"
         t0 = time.perf_counter()
         self.engine = create_engine(
             url,
@@ -106,14 +141,15 @@ class Conn:
             },
         )
         self.table = DB_TABLE
-        logger.info(f"DB engine created in {time.perf_counter()-t0:.2f}s")
+        logger.info(f"DB engine created in {time.perf_counter()-t0:.2f}s "
+                    f"(host={DB_HOST}, db={DB_NAME}, driver={DB_DRIVER})")
 
         # ORM-ish Core metadata for auth tables
         self.metadata = MetaData()
         self._define_auth_schema()
         self._ensure_auth_schema()
 
-        # Quick smoke tests
+        # Quick smoke tests (no sensitive info logged)
         try:
             with self.engine.connect() as con:
                 t = time.perf_counter()
@@ -162,8 +198,9 @@ class Conn:
 
     # ---------- User CRUD ----------
     def add_user(self, username: str, password: str, role: str = "salesperson", active: bool = True) -> bool:
+        """(Legacy) Add user; prefer create_user. Kept for compatibility."""
         u = self._norm_username(username)
-        pw_hash = bcrypt.hash(password)
+        pw_hash = pwd_context.hash(password)
         try:
             with self.engine.begin() as con:
                 con.execute(
@@ -185,11 +222,13 @@ class Conn:
         u = self._norm_username(username)
         try:
             with self.engine.begin() as con:
-                row = con.execute(select(self.users.c.id, self.users.c.password_hash).where(self.users.c.username == u)).fetchone()
+                row = con.execute(
+                    select(self.users.c.id, self.users.c.password_hash).where(self.users.c.username == u)
+                ).fetchone()
                 if row:
                     updates = {}
                     if password is not None:
-                        updates["password_hash"] = bcrypt.hash(password)
+                        updates["password_hash"] = pwd_context.hash(password)
                     if role is not None:
                         updates["role"] = role
                     if active is not None:
@@ -204,7 +243,7 @@ class Conn:
                     con.execute(
                         insert(self.users).values(
                             username=u,
-                            password_hash=bcrypt.hash(password),
+                            password_hash=pwd_context.hash(password),
                             role=role or "salesperson",
                             is_active=1 if (active is None or active) else 0,
                         )
@@ -226,11 +265,9 @@ class Conn:
             logger.error(f"[users] delete_user failed for {u}: {e}")
             return False
 
-    
-
     def create_user(self, username: str, password: str, role: str = "salesperson") -> bool:
         """
-        Create a new user with bcrypt_sha256-hashed password.
+        Create a new user with pbkdf2_sha256-hashed password.
         Returns True on success, False if username already exists.
         """
         u = self._norm_username(username)
@@ -246,14 +283,8 @@ class Conn:
                     logger.warning(f"[users] User {u} already exists")
                     return False
 
-                # Passlib returns a str like '$bcrypt-sha256$...'
                 pw_hash = pwd_context.hash(password)
-
-                # Only include is_active if the column exists (keeps code resilient)
-                values = {"username": u, "password_hash": pw_hash, "role": role}
-                if "is_active" in self.users.c.keys():
-                    values["is_active"] = 1
-
+                values = {"username": u, "password_hash": pw_hash, "role": role, "is_active": 1}
                 con.execute(insert(self.users).values(**values))
 
             logger.info(f"[users] Created user {u} with role {role}")
@@ -277,17 +308,16 @@ class Conn:
 
                 pw_hash, role, is_active = row
 
-                # if DB stored bytes for some reason, normalize to str
                 if isinstance(pw_hash, (bytes, bytearray)):
                     pw_hash = pw_hash.decode("utf-8", "ignore")
 
-                if is_active in (0, False):  # handle NULL/absent gracefully if needed
+                if is_active in (0, False):
                     return (False, None)
 
                 if not pwd_context.verify(password, pw_hash):
                     return (False, None)
 
-                # Optional: transparently upgrade old hashes to bcrypt_sha256
+                # Optional: transparently upgrade hashes if policy changed
                 if pwd_context.needs_update(pw_hash):
                     new_hash = pwd_context.hash(password)
                     try:
@@ -297,7 +327,6 @@ class Conn:
                             .values(password_hash=new_hash)
                         )
                     except Exception:
-                        # Non-fatal: login still succeeds even if rehash update fails
                         logger.warning("[users] could not upgrade password hash for %s", u)
 
                 return (True, role)
@@ -344,7 +373,6 @@ class Conn:
         """
         try:
             ids, _months = self._discover_columns(self.table)
-            # determine original salesperson column
             lower_map = {c.lower(): c for c in ids}
             sp_col = (
                 lower_map.get("salesman") or lower_map.get("salesperson") or lower_map.get("sales man name") or ids[1]
@@ -361,7 +389,7 @@ class Conn:
                         con.execute(
                             insert(self.users).values(
                                 username=u,
-                                password_hash=bcrypt.hash(default_password),
+                                password_hash=pwd_context.hash(default_password),
                                 role=default_role,
                                 is_active=1,
                             )
