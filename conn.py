@@ -1,3 +1,7 @@
+# conn.py
+# Uses Streamlit st.secrets (strict) for all DB config, percent-encodes creds,
+# and preflights TCP reachability before building the SQLAlchemy engine.
+
 # stdlib
 import time
 import re
@@ -6,6 +10,7 @@ import socket
 import datetime as _dt
 from typing import Optional, Tuple, Dict, Any, List
 from urllib.parse import quote_plus
+
 # third-party
 import numpy as np
 import pandas as pd
@@ -113,9 +118,7 @@ class Conn:
         # Preflight reachability
         _preflight_mysql(DB_HOST, DB_PORT)
 
-        # Build SQLAlchemy URL (include port)
-        
-
+        # Build SQLAlchemy URL (include port) with percent-encoded user/pass
         user_enc = quote_plus(DB_USER)
         pass_enc = quote_plus(DB_PASS)
         host_port = f"{DB_HOST}:{DB_PORT}" if DB_PORT else DB_HOST
