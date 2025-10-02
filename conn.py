@@ -5,7 +5,7 @@ import logging
 import socket
 import datetime as _dt
 from typing import Optional, Tuple, Dict, Any, List
-
+from urllib.parse import quote_plus
 # third-party
 import numpy as np
 import pandas as pd
@@ -114,8 +114,12 @@ class Conn:
         _preflight_mysql(DB_HOST, DB_PORT)
 
         # Build SQLAlchemy URL (include port)
+        
+
+        user_enc = quote_plus(DB_USER)
+        pass_enc = quote_plus(DB_PASS)
         host_port = f"{DB_HOST}:{DB_PORT}" if DB_PORT else DB_HOST
-        url = f"{DB_DRIVER}://{DB_USER}:{DB_PASS}@{host_port}/{DB_NAME}"
+        url = f"{DB_DRIVER}://{user_enc}:{pass_enc}@{host_port}/{DB_NAME}"
 
         # connect_args for PyMySQL
         connect_args = {
