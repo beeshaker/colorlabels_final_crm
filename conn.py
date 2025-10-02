@@ -1,8 +1,8 @@
 # stdlib
-import os
 import time
 import re
 import logging
+import socket
 import datetime as _dt
 from typing import Optional, Tuple, Dict, Any, List
 
@@ -18,12 +18,12 @@ from sqlalchemy import (
     select, insert, delete, update,
 )
 
-# IMPORTANT: use Streamlit secrets for config
+# Streamlit secrets for config
 import streamlit as st
 
 # ---- password hashing context (Passlib handles hashing & verify) ----
 pwd_context = CryptContext(
-    schemes=["pbkdf2_sha256"],   # ← use a single well-supported scheme
+    schemes=["pbkdf2_sha256"],   # single well-supported scheme
     deprecated="auto",
 )
 
@@ -34,70 +34,45 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 # ============================================================
-#                     CONFIG FROM SECRETS
+#                     CONFIG FROM SECRETS (STRICT)
 # ============================================================
-def _get_secret(path: List[str], default: Any = None) -> Any:
+def require_secret(path: List[str], hint: str = "") -> Any:
     """
-    Safely fetch nested keys from st.secrets, with env-var fallbacks for CI/local runs.
-    Path examples:
-      ["mysql", "host"], ["mysql", "timeouts", "connect"]
+    Fetch nested keys from st.secrets; raise RuntimeError if missing.
+    Example paths: ["mysql","host"], ["mysql","timeouts","connect"]
     """
     try:
         ref = st.secrets
         for k in path:
             ref = ref[k]
         return ref
-    except Exception:
-        # Fallback to environment variables for local dev/CI
-        # Map common paths to ENV names
-        env_map = {
-            ("mysql", "host"): "DB_HOST",
-            ("mysql", "port"): "DB_PORT",
-            ("mysql", "user"): "DB_USER",
-            ("mysql", "password"): "DB_PASS",
-            ("mysql", "database"): "DB_NAME",
-            ("mysql", "driver"): "DB_DRIVER",
-            ("mysql", "table_sales"): "DB_TABLE",
-            ("mysql", "table_bookings"): "DB_TABLE_BOOKINGS",
-            ("mysql", "timeouts", "connect"): "DB_CONNECT_TIMEOUT",
-            ("mysql", "timeouts", "read"): "DB_READ_TIMEOUT",
-            ("mysql", "timeouts", "write"): "DB_WRITE_TIMEOUT",
-            ("mysql", "timeouts", "pool"): "DB_POOL_TIMEOUT",
-        }
-        env_key = env_map.get(tuple(path))
-        if env_key and env_key in os.environ:
-            val = os.environ[env_key]
-            # Cast ports/timeouts to int when appropriate
-            if tuple(path) in {
-                ("mysql", "port"),
-                ("mysql", "timeouts", "connect"),
-                ("mysql", "timeouts", "read"),
-                ("mysql", "timeouts", "write"),
-                ("mysql", "timeouts", "pool"),
-            }:
-                try:
-                    return int(val)
-                except Exception:
-                    return default
-            return val
-        return default
+    except Exception as e:
+        pretty = "']['".join(path)
+        raise RuntimeError(
+            f"Missing st.secrets['{pretty}']. "
+            f"Add it to .streamlit/secrets.toml. {hint}"
+        ) from e
 
-DB_HOST   = _get_secret(["mysql", "host"], "localhost")
-DB_PORT   = _get_secret(["mysql", "port"], 3306)
-DB_USER   = _get_secret(["mysql", "user"], "user")
-DB_PASS   = _get_secret(["mysql", "password"], "")
-DB_NAME   = _get_secret(["mysql", "database"], "fullsales")
-DB_DRIVER = _get_secret(["mysql", "driver"], "mysql+pymysql")
+DB_HOST   = require_secret(["mysql", "host"],   "Example: host = \"db.example.com\"")
+DB_PORT   = int(require_secret(["mysql", "port"], "Example: port = 3306"))
+DB_USER   = require_secret(["mysql", "user"])
+DB_PASS   = require_secret(["mysql", "password"])
+DB_NAME   = require_secret(["mysql", "database"])
+DB_DRIVER = st.secrets["mysql"].get("driver", "mysql+pymysql")
 
-DB_TABLE           = _get_secret(["mysql", "table_sales"], "sales_report")
-DB_TABLE_BOOKINGS  = _get_secret(["mysql", "table_bookings"], "booking_report")
+DB_TABLE           = st.secrets["mysql"].get("table_sales", "sales_report")
+DB_TABLE_BOOKINGS  = st.secrets["mysql"].get("table_bookings", "booking_report")
 
 # Timeouts (seconds)
-CONNECT_TIMEOUT = _get_secret(["mysql", "timeouts", "connect"], 8)
-READ_TIMEOUT    = _get_secret(["mysql", "timeouts", "read"], 90)
-WRITE_TIMEOUT   = _get_secret(["mysql", "timeouts", "write"], 30)
-POOL_TIMEOUT    = _get_secret(["mysql", "timeouts", "pool"], 10)
+CONNECT_TIMEOUT = int(st.secrets["mysql"].get("timeouts", {}).get("connect", 8))
+READ_TIMEOUT    = int(st.secrets["mysql"].get("timeouts", {}).get("read", 90))
+WRITE_TIMEOUT   = int(st.secrets["mysql"].get("timeouts", {}).get("write", 30))
+POOL_TIMEOUT    = int(st.secrets["mysql"].get("timeouts", {}).get("pool", 10))
 
+# Optional SSL dict: {"ca": "...", "cert": "...", "key": "..."}
+SSL_DICT = st.secrets["mysql"].get("ssl", None)
+
+# Clip to current month start
 CLIP_TO_MONTH = pd.Timestamp(_dt.date.today().replace(day=1))
 
 # Accept 2023-Jan, 2024-Nov, … ; skip YTD/TOTAL/Projected
@@ -106,6 +81,18 @@ MONTH_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 EXCLUDE_TOKENS = ("YTD", "TOTAL", "PROJECTED")
+
+
+def _preflight_mysql(host: str, port: int, timeout: int = 3) -> None:
+    """Fail fast if host:port is unreachable."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return
+    except OSError as e:
+        raise RuntimeError(
+            f"Cannot reach MySQL at {host}:{port} ({e}). "
+            "Check network, firewall/SecGroup, and that host/port in st.secrets are correct."
+        )
 
 
 class Conn:
@@ -123,9 +110,23 @@ class Conn:
         conn.write_audit("CAROL", "login", extra="Login success")
     """
     def __init__(self):
-        # Build SQLAlchemy URL (include port if present)
+        # Preflight reachability
+        _preflight_mysql(DB_HOST, DB_PORT)
+
+        # Build SQLAlchemy URL (include port)
         host_port = f"{DB_HOST}:{DB_PORT}" if DB_PORT else DB_HOST
         url = f"{DB_DRIVER}://{DB_USER}:{DB_PASS}@{host_port}/{DB_NAME}"
+
+        # connect_args for PyMySQL
+        connect_args = {
+            "connect_timeout": CONNECT_TIMEOUT,
+            "read_timeout": READ_TIMEOUT,
+            "write_timeout": WRITE_TIMEOUT,
+        }
+        if SSL_DICT:
+            # PyMySQL expects a dict under key 'ssl'
+            connect_args["ssl"] = dict(SSL_DICT)
+
         t0 = time.perf_counter()
         self.engine = create_engine(
             url,
@@ -134,15 +135,13 @@ class Conn:
             pool_size=3,
             max_overflow=2,
             pool_timeout=POOL_TIMEOUT,
-            connect_args={
-                "connect_timeout": CONNECT_TIMEOUT,
-                "read_timeout": READ_TIMEOUT,
-                "write_timeout": WRITE_TIMEOUT,
-            },
+            connect_args=connect_args,
         )
         self.table = DB_TABLE
-        logger.info(f"DB engine created in {time.perf_counter()-t0:.2f}s "
-                    f"(host={DB_HOST}, db={DB_NAME}, driver={DB_DRIVER})")
+        logger.info(
+            f"DB engine created in {time.perf_counter()-t0:.2f}s "
+            f"(host={DB_HOST}, db={DB_NAME}, driver={DB_DRIVER})"
+        )
 
         # ORM-ish Core metadata for auth tables
         self.metadata = MetaData()
