@@ -151,7 +151,7 @@ def _pop_today_item() -> str:
     return item
 
 # ---------- Public API ----------
-def show_monthly_trivia_widget(title: str = "🇰🇪 Daily Label-Manufacturing Sales Trivia"):
+def show_monthly_trivia_widget(title: str = "Sales Trivia"):
     """Render the daily trivia card and a refresh button to fetch a new batch of 30."""
     _ensure_month_pool()
     item = _pop_today_item()
