@@ -2,6 +2,7 @@
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from menu import menu
 
 from helpers import (
     load_all_data,                 # cached data loader
@@ -10,9 +11,11 @@ from helpers import (
 )
 
 # ---------------- Page Config ----------------
-if not st.session_state.get("logged_in", False):
-    st.warning("Please login first.")
+if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
+    st.switch_page("app.py")
     st.stop()
+else:
+    menu()
 
 username = st.session_state["username"]
 role = st.session_state["role"]
