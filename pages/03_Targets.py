@@ -3,8 +3,8 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 from pandas.tseries.offsets import DateOffset
+from urllib.parse import unquote  # NEW
 from menu import menu
-
 
 from helpers import (
     load_all_data,                 # cached data loader
@@ -26,7 +26,6 @@ else:
 username = st.session_state["username"]
 role = st.session_state["role"]
 
-
 st.header("🎯 Customer Targets & Actions")
 
 st.info(
@@ -40,6 +39,11 @@ sales_df, bookings_df = load_all_data()
 if (sales_df is None or sales_df.empty) and (bookings_df is None or bookings_df.empty):
     st.error("No data available. Please check your data connection.")
     st.stop()
+
+# -------- Handle inbound query params from Pipeline --------
+params = st.query_params  # e.g., {'customer': 'Acme', 'month': '2025-09'}
+prefill_customer = params.get("customer", None)
+prefill_month = params.get("month", None)
 
 # ---------------- Sidebar Filters ----------------
 with st.sidebar:
@@ -58,6 +62,16 @@ with st.sidebar:
         st.error("No months found in data.")
         st.stop()
 
+    # If month query param is present, try to use it as default
+    if prefill_month:
+        try:
+            _pm = pd.to_datetime(prefill_month + "-01")
+            _pm = pd.Timestamp(year=_pm.year, month=_pm.month, day=1)
+            if _pm in months:
+                default_month = _pm
+        except Exception:
+            pass
+
     current_month = st.selectbox(
         "Analysis Month",
         months,
@@ -73,6 +87,11 @@ with st.sidebar:
     show_only_declining = st.checkbox("Show only declining customers (MoM)", value=False)
     top_n = st.number_input("Top N Customers", 10, 200, 30, 5)
 
+# Prefill banner (if navigated from Pipeline)
+if prefill_customer:
+    prefill_customer = unquote(prefill_customer)
+    st.info(f"🔗 Filtered from Pipeline: **{prefill_customer}** · **{current_month.strftime('%Y-%b')}**")
+
 # ---------------- Prep ----------------
 prev_month = current_month - DateOffset(months=1)
 last_year_month = current_month - DateOffset(years=1)
@@ -85,10 +104,41 @@ else:
     sales_work = sales_df.copy()
     bookings_work = bookings_df.copy()
 
+# ---------------- Cached aggregates for speed ----------------
+@st.cache_data(show_spinner=False)
+def build_customer_aggregates(sales_work: pd.DataFrame, bookings_work: pd.DataFrame):
+    # Sum sales by (Customer, Month)
+    s_by_cm = (
+        sales_work.groupby(["CustomerName", "Month"], as_index=False)["Sales"].sum()
+                  .set_index(["CustomerName", "Month"])["Sales"]
+                  .to_dict()
+    )
+    # Sum bookings by (Customer, Month)
+    b_by_cm = (
+        bookings_work.groupby(["CustomerName", "Month"], as_index=False)["Bookings"].sum()
+                     .set_index(["CustomerName", "Month"])["Bookings"]
+                     .to_dict()
+    )
+    # Yearly average sales per customer
+    tmp = sales_work.copy()
+    tmp["Year"] = tmp["Month"].dt.year
+    avg_by_cy = tmp.groupby(["CustomerName", "Year"])["Sales"].mean().to_dict()
+
+    customers_s = set(sales_work["CustomerName"].unique())
+    customers_b = set(bookings_work["CustomerName"].unique())
+    return s_by_cm, b_by_cm, avg_by_cy, customers_s, customers_b
+
+s_by_cm, b_by_cm, avg_by_cy, customers_s, customers_b = build_customer_aggregates(sales_work, bookings_work)
+
 # ---------------- Build targets ----------------
 targets = []
 
-all_customers = set(sales_work["CustomerName"].unique()) | set(bookings_work["CustomerName"].unique())
+# Customer scope (respect pre-filter if coming from Pipeline)
+if prefill_customer:
+    all_customers = {prefill_customer}
+else:
+    all_customers = (customers_s | customers_b)
+
 if not all_customers:
     st.info("No customers found for the selected filters.")
     st.stop()
@@ -100,29 +150,30 @@ for idx, customer in enumerate(sorted(all_customers)):
     progress_bar.progress((idx + 1) / max(len(all_customers), 1))
     status_text.text(f"Analyzing {customer} ({idx + 1}/{len(all_customers)})…")
 
-    cust_sales = sales_work[sales_work["CustomerName"] == customer]
-    cust_bookings = bookings_work[bookings_work["CustomerName"] == customer]
+    # Fast lookups from cached dicts
+    cur_sales = float(s_by_cm.get((customer, current_month), 0.0))
+    prev_sales = float(s_by_cm.get((customer, prev_month), 0.0))
+    ly_sales   = float(s_by_cm.get((customer, last_year_month), 0.0))
 
-    if cust_sales.empty and cust_bookings.empty:
-        continue
+    # LY & TY averages from cache
+    cy = int(pd.Timestamp(current_month).year)
+    ly_avg = avg_by_cy.get((customer, cy - 1), None)
+    ty_avg = avg_by_cy.get((customer, cy), None)
 
-    # Month snapshots
-    cur_sales = cust_sales[cust_sales["Month"] == current_month]["Sales"].sum()
-    prev_sales = cust_sales[cust_sales["Month"] == prev_month]["Sales"].sum()
-    ly_sales = cust_sales[cust_sales["Month"] == last_year_month]["Sales"].sum()
-
-    # LY & TY averages (for the appropriate years)
-    ly_mask = cust_sales["Month"].dt.year == (pd.Timestamp(current_month).year - 1)
-    ty_mask = cust_sales["Month"].dt.year == pd.Timestamp(current_month).year
-    ly_avg = cust_sales.loc[ly_mask, "Sales"].mean()
-    ty_avg = cust_sales.loc[ty_mask, "Sales"].mean()
-
-    # Bookings snapshot (current + “future” relative to selected month)
-    cur_bookings = cust_bookings[cust_bookings["Month"] == current_month]["Bookings"].sum()
-    future_bookings = cust_bookings[cust_bookings["Month"] > current_month]["Bookings"].sum()
+    # Bookings snapshots
+    cur_bookings = float(b_by_cm.get((customer, current_month), 0.0))
+    # Sum FUTURE bookings > current_month
+    future_bookings = sum(
+        v for (cust, m), v in b_by_cm.items()
+        if cust == customer and m > current_month
+    )
 
     # Conversion metrics (historical across months, filtered to salesperson if selected)
     conv_metrics = calculate_conversion_metrics(sales_work, bookings_work, customer, selected_sp)
+
+    # Current-month conversion for badge (reuse Pipeline logic)
+    conv_pct_current = (cur_sales / cur_bookings * 100.0) if cur_bookings > 0 else 0.0
+    has_conversion_issue = (cur_bookings > 0) and (conv_pct_current < 80.0)
 
     # Build target row
     row = {
@@ -139,10 +190,13 @@ for idx, customer in enumerate(sorted(all_customers)):
         "Current Bookings": cur_bookings,
         "Future Bookings": future_bookings,
         "booking_pipeline": cur_bookings + future_bookings,
-        "conversion_rate": conv_metrics["avg_conversion_rate"],
+        "conversion_rate": conv_metrics["avg_conversion_rate"],  # historical avg (%)
         "Conversion Trend": conv_metrics["conversion_trend"],
         "Recency_m": 0,  # (Optional) plug in if you compute recency elsewhere
         "current_sales": cur_sales,
+        # NEW fields
+        "Conversion % (Current)": conv_pct_current,
+        "Has Conversion Issue": "❗ Has conversion issue" if has_conversion_issue else "—",
     }
 
     # Score & actions
@@ -166,7 +220,8 @@ if targets_df.empty:
 
 # Numeric safety
 for col in ["Score", "MoM_%", "conversion_rate", "Gap_vs_LY", "Gap_vs_TY",
-            "Current Sales", "Current Bookings", "Future Bookings", "Recommended Target"]:
+            "Current Sales", "Current Bookings", "Future Bookings", "Recommended Target",
+            "Conversion % (Current)"]:
     if col in targets_df.columns:
         targets_df[col] = pd.to_numeric(targets_df[col], errors="coerce").fillna(0)
 
@@ -206,7 +261,9 @@ st.divider()
 
 # Display table (pretty)
 display_cols = [
-    "Customer", "Priority", "Score", "Current Sales", "MoM_%",
+    "Customer", "Priority", "Score",
+    "Has Conversion Issue",                    # NEW badge column
+    "Current Sales", "MoM_%",
     "Gap_vs_LY", "Current Bookings", "Future Bookings",
     "conversion_rate", "Conversion Trend", "Recommended Target", "Actions"
 ]
@@ -228,9 +285,13 @@ st.dataframe(
             "Score", min_value=0, max_value=1,
             help="Overall opportunity score (0–1). Higher = more important"
         ),
+        "Has Conversion Issue": st.column_config.TextColumn(
+            "⚠️ Conversion Flag",
+            help="Flags customers with current-month conversion <80% (and bookings > 0)"
+        ),
         "conversion_rate": st.column_config.ProgressColumn(
-            "Conversion %", min_value=0, max_value=100,
-            help="How well bookings convert to sales. Target: 80%+"
+            "Conversion % (Hist Avg)", min_value=0, max_value=100,
+            help="Historical average conversion (all months)"
         ),
         "Priority": st.column_config.TextColumn(
             "Priority",

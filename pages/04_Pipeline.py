@@ -2,6 +2,7 @@
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from urllib.parse import quote  # NEW
 from menu import menu
 
 from helpers import (
@@ -195,11 +196,24 @@ with col3:
 
 st.divider()
 
-# Pretty table
+# ---------------- "Open in Targets" deep-link helper ----------------
+def _targets_url(customer_name: str, month_ts: pd.Timestamp) -> str:
+    """
+    Build a URL that opens the Targets page pre-filtered to this customer & month.
+    Streamlit multi-page apps accept a `?page=Targets` param; we add our own params too.
+    """
+    return f"?page=Targets&customer={quote(customer_name)}&month={month_ts.strftime('%Y-%m')}"
+
+# ---------------- Pretty table ----------------
 display_df = pipeline_df.copy()
 for c in ["Total Bookings", "Total Sales", "Gap"]:
     display_df[c] = display_df[c].apply(format_currency)
 display_df["Conversion %"] = display_df["Conversion %"].round(1)
+
+# Add link column (unformatted URL; LinkColumn renders it nicely)
+display_df["Open Targets"] = [
+    _targets_url(r["Customer"], selected_month) for _, r in pipeline_df.iterrows()
+]
 
 st.dataframe(
     display_df,
@@ -217,6 +231,11 @@ st.dataframe(
         "Gap": st.column_config.TextColumn(
             "Revenue Gap",
             help="Amount of bookings not yet converted to sales"
+        ),
+        "Open Targets": st.column_config.LinkColumn(
+            "🎯 Open in Targets",
+            help="Open this customer/month in the Targets page",
+            display_text="Open"
         ),
     },
     hide_index=True,
