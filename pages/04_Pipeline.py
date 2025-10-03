@@ -2,7 +2,7 @@
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from urllib.parse import quote  # NEW
+from urllib.parse import quote  # kept for optional LinkColumn
 from menu import menu
 
 from helpers import (
@@ -196,11 +196,11 @@ with col3:
 
 st.divider()
 
-# ---------------- "Open in Targets" deep-link helper ----------------
+# ---------------- Helper to build deep-link URL (optional new-tab behavior) ----------------
 def _targets_url(customer_name: str, month_ts: pd.Timestamp) -> str:
     """
     Build a URL that opens the Targets page pre-filtered to this customer & month.
-    Streamlit multi-page apps accept a `?page=Targets` param; we add our own params too.
+    This is used for the LinkColumn (opens in new tab; new Streamlit session).
     """
     return f"?page=Targets&customer={quote(customer_name)}&month={month_ts.strftime('%Y-%m')}"
 
@@ -210,7 +210,7 @@ for c in ["Total Bookings", "Total Sales", "Gap"]:
     display_df[c] = display_df[c].apply(format_currency)
 display_df["Conversion %"] = display_df["Conversion %"].round(1)
 
-# Add link column (unformatted URL; LinkColumn renders it nicely)
+# Optional link column (opens in a new tab, will ask to log in again)
 display_df["Open Targets"] = [
     _targets_url(r["Customer"], selected_month) for _, r in pipeline_df.iterrows()
 ]
@@ -233,13 +233,29 @@ st.dataframe(
             help="Amount of bookings not yet converted to sales"
         ),
         "Open Targets": st.column_config.LinkColumn(
-            "🎯 Open in Targets",
-            help="Open this customer/month in the Targets page",
+            "🎯 Open in Targets (new tab)",
+            help="Opens the Targets page in a new tab (will require login again)",
             display_text="Open"
         ),
     },
     hide_index=True,
 )
+
+# ---------------- Same-tab navigation (preserves login) ----------------
+st.subheader("⚡ Quick jump to Targets (same tab)")
+st.caption("Use these buttons to open Targets in the same session (no re-login).")
+max_actions = min(20, len(pipeline_df))  # avoid rendering too many buttons at once
+cols = st.columns(3)
+for i, (_, r) in enumerate(pipeline_df.head(max_actions).iterrows()):
+    with cols[i % 3]:
+        if st.button(f"Open: {r['Customer']}", key=f"open_target_{i}"):
+            # Set query params then switch page IN THE SAME TAB
+            st.query_params.update({
+                "customer": r["Customer"],
+                "month": selected_month.strftime("%Y-%m")
+            })
+            # Adjust the path if your file is named differently
+            st.switch_page("pages/Targets.py")
 
 # ---------------- Focus list (actionable) ----------------
 st.subheader("🧭 Focus List (Top 5 biggest gaps)")
