@@ -61,10 +61,7 @@ def menu():
         ["pages/03_Targets.py", "pages/03_targets.py"],
         label="🎯 Targets"
     )
-    _safe_page_link(
-        ["pages/04_Pipeline.py", "pages/04_Pipeline.py"],
-        label="🛤️ Pipeline"
-    )
+    
     _safe_page_link(
         # Your repo showed different names across messages; try common variants:
         ["pages/05_Ai_analysis.py", "pages/05_AI_Analysis.py", "pages/AI_Analysis.py", "pages/AI_Insights.py"],
