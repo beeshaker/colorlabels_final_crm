@@ -54,7 +54,7 @@ def menu():
         label="🏠 Dashboard"
     )
     _safe_page_link(
-        ["pages/02_Bookings_Compare.py", "pages/02_Bookings.py", "pages/Bookings_Compare.py"],
+        ["pages/02_Bookings_compare.py", "pages/02_Bookings.py", "pages/Bookings_Compare.py"],
         label="📘 Bookings"
     )
     _safe_page_link(
