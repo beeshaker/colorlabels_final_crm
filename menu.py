@@ -63,7 +63,7 @@ def menu():
     )
     _safe_page_link(
         ["pages/04_Pipeline.py", "pages/04_Pipeline.py"],
-        label="🎯 Pipeline"
+        label="🛤️ Pipeline"
     )
     _safe_page_link(
         # Your repo showed different names across messages; try common variants:
